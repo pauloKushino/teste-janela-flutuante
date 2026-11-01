@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Teste de janela flutuante</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 16px/1.45 system-ui, sans-serif; margin: 0 auto; max-width: 640px; padding: 16px; }
+  h1 { font-size: 1.3rem; margin: 0 0 12px; }
+  h2 { font-size: 1.05rem; margin: 24px 0 8px; }
+  video, canvas { background: #000; display: block; width: 100%; }
+  button { font: inherit; margin: 8px 8px 0 0; min-height: 44px; padding: 8px 14px; }
+  input { box-sizing: border-box; font: inherit; margin-top: 8px; padding: 8px; width: 100%; }
+  pre { background: rgba(127,127,127,.15); font-size: 12px; margin-top: 24px; overflow-wrap: anywhere; padding: 10px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>Teste de janela flutuante</h1>
+
+<section id="sender" hidden>
+  <p>Deixe esta aba visível no PC. O teste transmite um relógio e um bipe por segundo.</p>
+  <button id="start">Iniciar transmissão de teste</button>
+  <input id="link" readonly placeholder="O link para o iPhone aparece aqui">
+  <canvas id="canvas" width="640" height="360"></canvas>
+</section>
+
+<section id="viewer" hidden>
+  <h2>1. Transmissão WebRTC</h2>
+  <p>Toque em Tocar, depois em Janela flutuante, e saia do navegador.</p>
+  <video id="rtc" playsinline controls></video>
+  <button id="rtcPlay">Tocar</button>
+  <button id="rtcPip">Janela flutuante</button>
+
+  <h2>2. Vídeo HLS de controle</h2>
+  <video id="hls" playsinline controls preload="none"
+    src="https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_16x9/bipbop_16x9_variant.m3u8"></video>
+  <button id="hlsPlay">Tocar</button>
+  <button id="hlsPip">Janela flutuante</button>
+</section>
+
+<pre id="log"></pre>
+
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const log = msg => {
+  $('log').textContent += new Date().toLocaleTimeString() + '  ' + msg + '\n';
+};
+const room = location.hash.slice(1);
+log(navigator.userAgent);
+
+if (room) startViewer(); else $('sender').hidden = false;
+
+$('start').onclick = () => {
+  $('start').disabled = true;
+  const stream = testStream();
+  const peer = new Peer('teste-pip-' + crypto.randomUUID());
+  peer.on('open', id => {
+    $('link').value = location.origin + location.pathname + '#' + id;
+    log('Pronto para receber o iPhone');
+  });
+  peer.on('connection', conn => {
+    log('iPhone entrou');
+    conn.on('open', () => watch(peer.call(conn.peer, stream).peerConnection, 'envio'));
+  });
+  peer.on('error', e => log('ERRO PeerJS ' + e.type + ': ' + e.message));
+};
+$('link').onclick = () => $('link').select();
+
+function testStream() {
+  const canvas = $('canvas');
+  const ctx = canvas.getContext('2d');
+  const startedAt = Date.now();
+  setInterval(() => {
+    const t = (Date.now() - startedAt) / 1000;
+    ctx.fillStyle = '#123';
+    ctx.fillRect(0, 0, 640, 360);
+    ctx.fillStyle = '#4cf';
+    ctx.fillRect(((t * 160) % 680) - 40, 280, 40, 40);
+    ctx.fillStyle = '#fff';
+    ctx.font = '80px monospace';
+    ctx.fillText(t.toFixed(1) + 's', 60, 170);
+  }, 33);
+
+  const audio = new AudioContext();
+  const dest = audio.createMediaStreamDestination();
+  const gain = audio.createGain();
+  const osc = audio.createOscillator();
+  gain.gain.value = 0;
+  osc.frequency.value = 660;
+  osc.connect(gain).connect(dest);
+  osc.start();
+  setInterval(() => {
+    gain.gain.setValueAtTime(0.3, audio.currentTime);
+    gain.gain.setValueAtTime(0, audio.currentTime + 0.1);
+  }, 1000);
+
+  return new MediaStream([...canvas.captureStream(30).getTracks(), ...dest.stream.getTracks()]);
+}
+
+function startViewer() {
+  $('viewer').hidden = false;
+  const rtc = $('rtc');
+  const hls = $('hls');
+  [['WebRTC', rtc], ['HLS', hls]].forEach(([name, video]) => {
+    log(name + ' suporta PiP (WebKit): ' + (video.webkitSupportsPresentationMode
+      ? video.webkitSupportsPresentationMode('picture-in-picture') : 'sem API'));
+    ['playing', 'pause', 'error', 'enterpictureinpicture', 'leavepictureinpicture',
+      'webkitpresentationmodechanged'].forEach(type =>
+      video.addEventListener(type, () =>
+        log(name + ' evento ' + type + (video.webkitPresentationMode ? ' modo=' + video.webkitPresentationMode : ''))));
+  });
+  $('rtcPlay').onclick = () => play(rtc, 'WebRTC');
+  $('hlsPlay').onclick = () => play(hls, 'HLS');
+  $('rtcPip').onclick = () => pip(rtc, 'WebRTC');
+  $('hlsPip').onclick = () => pip(hls, 'HLS');
+  document.addEventListener('visibilitychange', () => log('Página ' + document.visibilityState));
+
+  const peer = new Peer();
+  peer.on('open', () => peer.connect(room));
+  peer.on('call', call => {
+    call.answer();
+    watch(call.peerConnection, 'recebimento');
+    call.on('stream', stream => {
+      rtc.srcObject = stream;
+      log('Transmissão recebida: toque em Tocar');
+    });
+  });
+  peer.on('error', e => log('ERRO PeerJS ' + e.type + ': ' + e.message));
+}
+
+function play(video, name) {
+  video.play().catch(e => log(name + ' ERRO ao tocar ' + e.name + ': ' + e.message));
+}
+
+async function pip(video, name) {
+  try {
+    if (video.webkitSupportsPresentationMode && video.webkitSupportsPresentationMode('picture-in-picture')) {
+      video.webkitSetPresentationMode('picture-in-picture');
+      log(name + ' pedido de PiP enviado (WebKit)');
+      setTimeout(() => log(name + ' modo após o pedido: ' + video.webkitPresentationMode), 1500);
+    } else if (video.requestPictureInPicture) {
+      await video.requestPictureInPicture();
+      log(name + ' PiP aberto');
+    } else {
+      log(name + ' sem API de PiP');
+    }
+  } catch (e) {
+    log(name + ' ERRO no PiP ' + e.name + ': ' + e.message);
+  }
+}
+
+function watch(pc, label) {
+  pc.addEventListener('connectionstatechange', async () => {
+    log('Conexão de ' + label + ': ' + pc.connectionState);
+    if (pc.connectionState !== 'connected') return;
+    const stats = await pc.getStats();
+    stats.forEach(pair => {
+      if (pair.type === 'candidate-pair' && pair.nominated) {
+        const local = stats.get(pair.localCandidateId);
+        log('Tipo de conexão de ' + label + ': ' + (local ? local.candidateType : 'desconhecido'));
+      }
+    });
+  });
+}
+</script>
+</body>
+</html>
